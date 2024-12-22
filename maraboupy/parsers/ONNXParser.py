@@ -209,6 +209,10 @@ class ONNXParser:
             self.softmaxEquations(node, makeEquations)
         elif node.op_type == 'Sub':
             self.subEquations(node, makeEquations)
+        elif node.op_type == 'Div':
+            self.divEquations(node, makeEquations)
+        elif node.op_type == 'Erf':
+            self.erfEquations(node, makeEquations)
         else:
             raise NotImplementedError("Operation {} not implemented".format(node.op_type))
 
@@ -1045,28 +1049,71 @@ class ONNXParser:
         # Get the inputs
         inputName1, inputName2 = node.input
         shape1 = self.shapeMap[inputName1]
-        # shape2 = self.shapeMap[inputName2] # comment out since this is never used.
+        shape2 = self.shapeMap[inputName2] 
 
 
         # Get the broadcasted shape
-        outShape = shape1
+        outShape = getBroadcastShape(shape1, shape2)
         self.shapeMap[nodeName] = outShape
         if not makeEquations:
             return
 
-        multiple = self.constantMap[inputName2]
-        input1 = self.varMap[inputName1]
+        # 두 입력이 모두 상수인 경우
+        if inputName1 in self.constantMap and inputName2 in self.constantMap:
+            self.constantMap[nodeName] = self.constantMap[inputName1] * self.constantMap[inputName2]
+            return
+            
+        # 첫 번째 입력이 상수인 경우
+        elif inputName1 in self.constantMap:
+            input1 = self.constantMap[inputName1]
+            input2 = self.varMap[inputName2]
+        # 두 번째 입력이 상수인 경우
+        elif inputName2 in self.constantMap:
+            input1 = self.varMap[inputName1]
+            input2 = self.constantMap[inputName2]
+        # 두 입력 모두 변수인 경우
+        else:
+            input1 = self.varMap[inputName1]
+            input2 = self.varMap[inputName2]
+            outputVariables = self.makeNewVariables(nodeName)
+            # 두 변수의 곱셈을 위한 bilinear 제약 조건 추가
+            input1 = input1.reshape(-1)
+            input2 = input2.reshape(-1)
+            outputVariables = outputVariables.reshape(-1)
+            for i in range(len(input1)):
+                self.query.addBilinear(input1[i], input2[i], outputVariables[i])
+            return
+
+        # 하나가 상수인 경우의 처리
         outputVariables = self.makeNewVariables(nodeName)
         input1 = input1.reshape(-1)
+        input2 = input2.reshape(-1) 
         outputVariables = outputVariables.reshape(-1)
 
         for i in range(len(input1)):
             e = MarabouUtils.Equation()
-            e.addAddend(multiple, input1[i])
+            if isinstance(input1, np.ndarray):
+                e.addAddend(input1[i], input2)
+            else:
+                e.addAddend(input2[i], input1)
             e.addAddend(-1, outputVariables[i])
             e.setScalar(0.0)
             self.query.addEquation(e)
         return
+    
+        # multiple = self.constantMap[inputName2]
+        # input1 = self.varMap[inputName1]
+        # outputVariables = self.makeNewVariables(nodeName)
+        # input1 = input1.reshape(-1)
+        # outputVariables = outputVariables.reshape(-1)
+
+        # for i in range(len(input1)):
+        #     e = MarabouUtils.Equation()
+        #     e.addAddend(multiple, input1[i])
+        #     e.addAddend(-1, outputVariables[i])
+        #     e.setScalar(0.0)
+        #     self.query.addEquation(e)
+        # return
 
     def addEquations(self, node, makeEquations):
         """Function to generate equations corresponding to addition
@@ -1318,6 +1365,94 @@ class ONNXParser:
         for f in outputVars:
             self.query.setLowerBound(f, -1.0)
             self.query.setUpperBound(f, 1.0)
+
+    def divEquations(self, node, makeEquations): # for GELU
+        """나눗셈 연산에 대한 방정식 생성
+        
+        Args:
+            node (node): ONNX node representing the DIV operation
+            makeEquations (bool): True if we need to create new variables and add new DIV
+        """
+        nodeName = node.output[0]
+        inputName1 = node.input[0]
+        inputName2 = node.input[1]
+        self.shapeMap[nodeName] = self.shapeMap[inputName1]
+        if not makeEquations:
+            return
+        
+        # Get variables/constants
+        inputVars1 = self.varMap[inputName1].reshape(-1)
+        
+        # 두 번째 입력이 상수인지 변수인지 확인
+        if inputName2 in self.constantMap:
+            inputVars2 = self.constantMap[inputName2].reshape(-1)
+        else:
+            inputVars2 = self.varMap[inputName2].reshape(-1)
+        
+        outputVars = self.makeNewVariables(nodeName).reshape(-1)
+        assert len(inputVars1) == len(outputVars)
+
+
+        # Generate equations
+        for i in range(len(outputVars)):
+            e = MarabouUtils.Equation()
+            e.addAddend(inputVars2, outputVars[i])     # b*c
+            e.addAddend(-1, inputVars1[i])             # -a
+            e.setScalar(0)                             # b*c - a = 0
+            self.query.addEquation(e)
+            
+            # 제수가 상수인 경우 0으로 나누는 것을 방지
+            if inputName2 in self.constantMap:
+                if abs(inputVars2) < 1e-7:
+                    raise RuntimeError(f"Division by zero or near-zero constant: {inputVars2[i]}")
+
+    def erfEquations(self, node, makeEquations):
+        """Error function 연산에 대한 방정식 생성
+        
+        Args:
+            nnode (node): ONNX node representing the erf operation
+            makeEquations (bool): True if we need to create new variables and add new erf
+        """
+        nodeName = node.output[0]
+        inputName = node.input[0]
+        self.shapeMap[nodeName] = self.shapeMap[inputName]
+        
+        if not makeEquations:
+            return
+        
+        # Get variables
+        inputVars = self.varMap[inputName].reshape(-1)
+        outputVars = self.makeNewVariables(nodeName).reshape(-1)
+        assert len(inputVars) == len(outputVars)
+        
+        # Erf를 근사하기 위한 중간 변수들
+        sigmoidVars = np.array([self.query.getNewVariable() for _ in range(len(inputVars))])
+        
+        # Erf(x)를 sigmoid로 근사: erf(x) ≈ 2*sigmoid(sqrt(2/pi)*x) - 1
+        SQRT_2_PI = 0.7978845608028654  # sqrt(2/pi)
+        
+        for i in range(len(inputVars)):
+            # 첫 번째 스케일링: sqrt(2/pi)*x
+            scaledVar = self.query.getNewVariable()
+            e = MarabouUtils.Equation()
+            e.addAddend(SQRT_2_PI, inputVars[i])
+            e.addAddend(-1, scaledVar)
+            e.setScalar(0)
+            self.query.addEquation(e)
+            
+            # sigmoid 적용
+            self.query.addSigmoid(scaledVar, sigmoidVars[i])
+            
+            # 최종 출력: 2*sigmoid - 1
+            e = MarabouUtils.Equation()
+            e.addAddend(2, sigmoidVars[i])
+            e.addAddend(-1, outputVars[i])
+            e.setScalar(1)
+            self.query.addEquation(e)
+            
+            # Erf의 출력은 [-1, 1] 범위
+            self.query.setLowerBound(outputVars[i], -1.0)
+            self.query.setUpperBound(outputVars[i], 1.0)
 
     def cleanShapes(self):
         """Remove unused shapes

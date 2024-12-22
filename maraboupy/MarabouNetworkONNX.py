@@ -19,6 +19,8 @@ import onnxruntime
 from maraboupy.MarabouNetwork import MarabouNetwork
 from maraboupy.parsers.ONNXParser import ONNXParser
 import os
+from maraboupy import MarabouCore
+from maraboupy.MarabouUtils import Equation
 
 class MarabouNetworkONNX(MarabouNetwork):
     """Constructs a MarabouNetworkONNX object from an ONNX file
@@ -170,3 +172,95 @@ class MarabouNetworkONNX(MarabouNetwork):
                 raise NotImplementedError("Inputs to network expected to be of type 'float', not %s" % onnxType)
             input_dict[inputName] = inputValues[i].reshape(self.inputVars[i].shape).astype(inputType)
         return sess.run(self.outputNames, input_dict)
+    
+    def addGeLUConstraint(self, input_var, output_var):
+        """GeLU activation function에 대한 제약조건 추가
+        
+            GeLU(x) = 0.5x * (1 + tanh(sqrt(2/pi) * (x + 0.044715x^3)))
+            이를 구간별 Linear function으로 근사
+            
+            Args:
+                input_var (int): 입력 변수 번호
+                output_var (int): 출력 변수 번호
+        """
+        # 중간 변수들 생성
+        temp_var1 = self.getNewVariable()  # x^3 항을 위한 변수
+        temp_var2 = self.getNewVariable()  # tanh 입력을 위한 변수
+        temp_var3 = self.getNewVariable()  # tanh 출력을 위한 변수
+        
+        # 상수들
+        SQRT_2_PI = 0.7978845608028654  # sqrt(2/pi)
+        COEF = 0.044715
+        
+        # 1. x^3 근사
+        self.addPiecewiseLinearConstraint(input_var, temp_var1, [
+            (-float('inf'), -2.0, -8.0, 0.0),
+            (-2.0, -1.0, -1.0, -3.0),
+            (-1.0, 1.0, 1.0, 0.0),
+            (1.0, 2.0, 1.0, 3.0),
+            (2.0, float('inf'), 8.0, 0.0)
+        ])
+        
+        # 2. tanh 입력 계산: sqrt(2/pi) * (x + 0.044715x^3)
+        e = Equation()
+        e.addAddend(SQRT_2_PI, input_var)
+        e.addAddend(SQRT_2_PI * COEF, temp_var1)
+        e.addAddend(-1, temp_var2)
+        e.setScalar(0)
+        e.type = MarabouCore.Equation.EquationType.EQ
+        self.addEquation(e)
+        
+        # 3. tanh 근사
+        self.addPiecewiseLinearConstraint(temp_var2, temp_var3, [
+            (-float('inf'), -2.0, 0.0, -1.0),
+            (-2.0, -1.0, 0.4, -0.6),
+            (-1.0, 1.0, 0.8, 0.0),
+            (1.0, 2.0, 0.4, 0.6),
+            (2.0, float('inf'), 0.0, 1.0)
+        ])
+        
+        # 4. 최종 GeLU 출력 계산: 0.5x * (1 + tanh)
+        e = Equation()
+        e.addAddend(0.5, input_var)
+        e.addAddend(0.5, input_var)
+        e.addAddend(-1, output_var)
+        e.addAddend(0.5, temp_var3)
+        e.setScalar(0)
+        e.type = MarabouCore.Equation.EquationType.EQ
+        self.addEquation(e)
+
+    def addPiecewiseLinearConstraint(self, input_var, output_var, points):
+        """구간별 선형 제약조건 추가
+        
+        Args:
+            input_var (int): 입력 변수 번호
+            output_var (int): 출력 변수 번호 
+            points (list): [(x1,x2,y1,y2), ...] 형태의 구간 정의 리스트
+                         각 tuple은 (구간 시작, 구간 끝, 시작 y값, 끝 y값)을 의미
+        """
+        # MarabouCore.PiecewiseLinearConstraint 대신 기본 선형 제약조건들을 사용
+        for x1, x2, y1, y2 in points:
+            if x1 == float('-inf'):
+                # 왼쪽 무한대 구간
+                slope = (y2 - y1) / (x2 - x1) if x2 != x1 else 0
+                e = Equation()
+                e.addAddend(-slope, input_var)
+                e.addAddend(1, output_var)
+                e.setScalar(y2 - slope * x2)
+                self.addEquation(e)
+            elif x2 == float('inf'):
+                # 오른쪽 무한대 구간  
+                slope = (y2 - y1) / (x2 - x1) if x2 != x1 else 0
+                e = Equation()
+                e.addAddend(-slope, input_var)
+                e.addAddend(1, output_var)
+                e.setScalar(y1 - slope * x1)
+                self.addEquation(e)
+            else:
+                # 나머지 구간
+                slope = (y2 - y1) / (x2 - x1) if x2 != x1 else 0
+                e = Equation()
+                e.addAddend(-slope, input_var)
+                e.addAddend(1, output_var)
+                e.setScalar(y1 - slope * x1)
+                self.addEquation(e)

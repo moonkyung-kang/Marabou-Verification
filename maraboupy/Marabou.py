@@ -12,7 +12,8 @@ directory for licensing information.
 
 Marabou defines key functions that make up the main user interface to Maraboupy
 '''
-
+import sys
+sys.path.insert(1, '/app/Marabou')
 import warnings
 from maraboupy.MarabouCore import *
 
