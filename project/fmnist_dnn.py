@@ -6,10 +6,6 @@ import sys
 import os
 import pandas as pd
 from tqdm import tqdm
-# terminal_command = 'wget --no-cache --backups=1 https://raw.githubusercontent.com/DDiekmann/Applied-Verification-Lab-Neural-Networks/main/lib/mnist_trainer.py'
-
-# os.system(terminal_command)
-
 import matplotlib.pyplot as plt
 sys.path.insert(1, '/Users/moonkyung/Desktop/Marabou')
 from maraboupy import Marabou
@@ -17,7 +13,9 @@ from maraboupy import MarabouCore
 import torchvision.datasets as datasets
 import torchvision.transforms as transforms
 from torch.utils.data import DataLoader
-options = Marabou.createOptions(verbosity = 0)
+
+# 데이터 셋 다운로드 및 전처리
+# FashionMNIST 사용
 transform = transforms.Compose([
         transforms.ToTensor(),
     ])
@@ -37,6 +35,9 @@ test_data = datasets.FashionMNIST(
 train_dataloader=DataLoader(training_data, batch_size=64)
 test_dataloader = DataLoader(test_data, batch_size=64)
 device = "cuda" if torch.cuda.is_available() else "cpu"
+
+# 모델 정의
+# (28,28) 이미지를 받아서 Fully connected layer 10개를 통해 10개의 클래스로 분류하는 모델
 class NeuralNetwork(nn.Module):
     def __init__(self, input_dim, output_dim, number_of_neurons):
         super(NeuralNetwork, self).__init__()
@@ -67,6 +68,7 @@ class NeuralNetwork(nn.Module):
         logits = self.model(x)
         return logits
 
+# 모델 학습
 def train(dataloader, model, loss_fn, optimizer):
     model.train()
     for batch, (X, y) in enumerate(tqdm(dataloader)):
@@ -81,7 +83,7 @@ def train(dataloader, model, loss_fn, optimizer):
         loss.backward()
         optimizer.step()
 
-
+# 모델 테스트
 def test(dataloader, model, loss_fn):
     size = len(dataloader.dataset)
     num_batches = len(dataloader)
@@ -97,7 +99,7 @@ def test(dataloader, model, loss_fn):
     correct /= size
     return correct, test_loss
 
-
+# 모델 학습 및 테스트
 def train_model(model, epochs, train_dataloader, test_dataloader):
     torch.manual_seed(42)
     model = model.to(device)
@@ -121,6 +123,7 @@ model = train_model(
     test_dataloader=test_dataloader,
     )
 
+# 모델 저장
 model_filename = "/Users/moonkyung/Desktop/Marabou/project/fmnist_dnn.onnx"
 
 # set model to eval mode
@@ -130,7 +133,7 @@ model.eval()
 dummy_input = torch.randn(1, 28, 28)
 
 dummy_input = dummy_input.to(device)
-
+# 모델 저장
 torch.onnx.export(model,
                   dummy_input,
                   model_filename,
